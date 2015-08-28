@@ -1,16 +1,25 @@
 package org.goughy.garageduino;
 
 import android.app.*;
+import android.bluetooth.BluetoothAdapter;
+import android.bluetooth.BluetoothDevice;
+import android.content.*;
 import android.os.Bundle;
+import android.os.Handler;
+import android.os.IBinder;
 import android.support.v13.app.FragmentPagerAdapter;
 import android.support.v4.view.ViewPager;
+import android.util.Log;
 import android.view.Menu;
 import android.view.MenuItem;
+import android.view.WindowManager;
 
 import java.util.Locale;
+import java.util.UUID;
 
 
-public class RFduinoActivity extends Activity implements ActionBar.TabListener
+public class RFduinoActivity extends Activity implements ActionBar.TabListener,
+        BluetoothAdapter.LeScanCallback, GarageButtonFragment.OnClickListener
 {
     private static final String TAG = "RFduinoActivity";
 
@@ -23,6 +32,107 @@ public class RFduinoActivity extends Activity implements ActionBar.TabListener
      * {@link android.support.v13.app.FragmentStatePagerAdapter}.
      */
     private SectionsPagerAdapter mSectionsPagerAdapter;
+    private GarageButtonFragment buttonFragment;
+    private GarageInfoFragment infoFragment;
+
+
+    private BluetoothAdapter bluetoothAdapter;
+    private BluetoothDevice bluetoothDevice;
+    private RFduinoService rfduinoService;
+
+    private final BroadcastReceiver bluetoothStateReceiver = new BroadcastReceiver()
+    {
+        @Override
+        public void onReceive( Context context, Intent intent )
+        {
+            int state = intent.getIntExtra( BluetoothAdapter.EXTRA_STATE, 0 );
+            if( state == BluetoothAdapter.STATE_ON )
+                updateState( State.DISCONNECTED );
+            else if( state == BluetoothAdapter.STATE_OFF )
+                updateState( State.BLUETOOTH_OFF );
+        }
+    };
+
+    private final BroadcastReceiver scanModeReceiver = new BroadcastReceiver()
+    {
+        @Override
+        public void onReceive( Context context, Intent intent )
+        {
+            state = bluetoothAdapter.getScanMode() != BluetoothAdapter.SCAN_MODE_NONE ? State.SCANNING : State.DISCONNECTED;
+
+            if( bluetoothAdapter.getScanMode() == BluetoothAdapter.SCAN_MODE_NONE )
+                Log.i( TAG, "Scan receiver got BluetoothAdapter.SCAN_MODE_NONE" );
+            else if( bluetoothAdapter.getScanMode() == BluetoothAdapter.SCAN_MODE_CONNECTABLE )
+                Log.i( TAG, "Scan receiver got BluetoothAdapter.SCAN_MODE_CONNECTABLE" );
+            else if( bluetoothAdapter.getScanMode() == BluetoothAdapter.SCAN_MODE_CONNECTABLE_DISCOVERABLE )
+                Log.i( TAG, "Scan receiver got BluetoothAdapter.SCAN_MODE_CONNECTABLE_DISCOVERABLE" );
+        }
+    };
+
+    private final ServiceConnection rfduinoServiceConnection = new ServiceConnection()
+    {
+        @Override
+        public void onServiceConnected( ComponentName name, IBinder service )
+        {
+            rfduinoService = ( (RFduinoService.LocalBinder) service ).getService();
+
+            if( rfduinoService.initialize() )
+            {
+                if( rfduinoService.connect( bluetoothDevice.getAddress() ) )
+                {
+                    updateState( State.CONNECTING );
+                    Log.w( TAG, "rfduinoService connecting to " + bluetoothDevice.getAddress() );
+                }
+                else
+                    Log.w( TAG, "rfduinoService failed to connect to " + bluetoothDevice.getAddress());
+            }
+            else
+                Log.w( TAG, "rfduinoService failed to initialise!");
+        }
+
+        @Override
+        public void onServiceDisconnected( ComponentName name )
+        {
+            rfduinoService = null;
+            updateState( State.DISCONNECTED );
+        }
+    };
+
+    private final BroadcastReceiver rfduinoReceiver = new BroadcastReceiver()
+    {
+        @Override
+        public void onReceive( Context context, Intent intent )
+        {
+            final String action = intent.getAction();
+            if( RFduinoService.ACTION_CONNECTED.equals( action ) )
+            {
+                updateState( State.CONNECTED );
+                Log.i( TAG, "Woohoo! Connected to " + bluetoothDevice.getAddress() );
+            }
+            else if( RFduinoService.ACTION_DISCONNECTED.equals( action ) )
+            {
+                updateState( State.DISCONNECTED );
+                Log.i( TAG, "Hmmm! Sadly we've disconnected from " + bluetoothDevice.getAddress() );
+            }
+//            else if( RFduinoService.ACTION_DATA_AVAILABLE.equals( action ) )
+//                addData(intent.getByteArrayExtra(RFduinoService.EXTRA_DATA));
+        }
+    };
+
+    private State state;
+    private static final long SCAN_TIMEOUT= 10000;
+
+    private Handler handler = new Handler();
+
+    Runnable progressTimeout = new Runnable()
+    {
+        @Override
+        public void run()
+        {
+            if( state == State.SCANNING )
+                stopScanning();
+        }
+    };
 
     /**
      * The {@link ViewPager} that will host the section contents.
@@ -34,6 +144,8 @@ public class RFduinoActivity extends Activity implements ActionBar.TabListener
     {
         super.onCreate( savedInstanceState );
         setContentView( R.layout.activity_main );
+
+        getWindow().addFlags( WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON );
 
         // Set up the action bar.
         final ActionBar actionBar = getActionBar();
@@ -71,8 +183,35 @@ public class RFduinoActivity extends Activity implements ActionBar.TabListener
                             .setText( mSectionsPagerAdapter.getPageTitle( i ) )
                             .setTabListener( this ) );
         }
+
+        bluetoothAdapter = BluetoothAdapter.getDefaultAdapter();
+
+        registerReceiver( scanModeReceiver, new IntentFilter( BluetoothAdapter.ACTION_SCAN_MODE_CHANGED ) );
+        registerReceiver( bluetoothStateReceiver, new IntentFilter( BluetoothAdapter.ACTION_STATE_CHANGED ) );
+        registerReceiver( rfduinoReceiver, RFduinoService.getIntentFilter() );
+
+        updateState( bluetoothAdapter.isEnabled() ? State.DISCONNECTED : State.BLUETOOTH_OFF );
+        Log.i(TAG, "Created");
     }
 
+    @Override
+    public void onDestroy()
+    {
+        if( state == State.SCANNING )
+            bluetoothAdapter.stopLeScan( this );
+
+        if( rfduinoService != null )
+        {
+            rfduinoService.disconnect();
+            rfduinoService.close();
+        }
+
+        unregisterReceiver( scanModeReceiver );
+        unregisterReceiver( bluetoothStateReceiver );
+        unregisterReceiver( rfduinoReceiver );
+
+        super.onDestroy();
+    }
 
     @Override
     public boolean onCreateOptionsMenu( Menu menu )
@@ -92,9 +231,7 @@ public class RFduinoActivity extends Activity implements ActionBar.TabListener
 
         //noinspection SimplifiableIfStatement
         if( id == R.id.action_settings )
-        {
             return true;
-        }
 
         return super.onOptionsItemSelected( item );
     }
@@ -123,7 +260,6 @@ public class RFduinoActivity extends Activity implements ActionBar.TabListener
      */
     public class SectionsPagerAdapter extends FragmentPagerAdapter
     {
-
         public SectionsPagerAdapter( FragmentManager fm )
         {
             super( fm );
@@ -133,9 +269,15 @@ public class RFduinoActivity extends Activity implements ActionBar.TabListener
         public Fragment getItem( int position )
         {
             if( position == 0 )
-                return GarageButtonFragment.newInstance( position + 1 );
+            {
+                buttonFragment = GarageButtonFragment.newInstance( position + 1 );
+                return buttonFragment;
+            }
             else
-                return GarageInfoFragment.newInstance( position + 1 );
+            {
+                infoFragment = GarageInfoFragment.newInstance( position + 1 );
+                return infoFragment;
+            }
         }
 
         @Override
@@ -159,4 +301,107 @@ public class RFduinoActivity extends Activity implements ActionBar.TabListener
             return null;
         }
     }
+
+    private void updateState( State newState )
+    {
+        Log.i( TAG, "Changing state from " + state + " to " + newState );
+        state = newState;
+        if( buttonFragment != null )
+            buttonFragment.updateState( newState );
+    }
+
+    public void setError( String msg )
+    {
+        updateState( State.ERROR );
+        if( buttonFragment != null )
+            buttonFragment.setError( msg );
+    }
+
+    @Override
+    public void onLeScan(BluetoothDevice device, final int rssi, final byte[] scanRecord)
+    {
+        bluetoothAdapter.stopLeScan( this );
+        bluetoothDevice = device;
+
+        Log.i( TAG, "Found device " + device.getName() + " (" + device.getAddress() + ")" );
+
+        startConnecting();
+    }
+
+    @Override
+    public void onActivityResult( int requestCode, int resultCode, Intent data )
+    {
+        if( requestCode == 123 ) //enable bluetooth
+        {
+            if( resultCode == Activity.RESULT_OK )
+            {
+                if( bluetoothAdapter.isEnabled() )
+                {
+                    startScanning();
+                    return;
+                }
+            }
+
+            setError( "Bluetooth disabled" );
+        }
+    }
+
+    private void enableBluetooth()
+    {
+        updateState( State.BLUETOOTH_ENABLING );
+        startActivityForResult( new Intent( BluetoothAdapter.ACTION_REQUEST_ENABLE ), 123 );
+    }
+
+    private void startScanning()
+    {
+        updateState( State.SCANNING );
+
+        bluetoothAdapter.startLeScan(
+                new UUID[]{ RFduinoService.UUID_SERVICE },
+                this );
+
+        handler.postDelayed( progressTimeout, SCAN_TIMEOUT );
+        Log.i( TAG, "BTLE scanning" );
+    }
+
+    private void stopScanning()
+    {
+        bluetoothAdapter.stopLeScan( this );
+        setError( "Timed out" );
+    }
+
+    private void startConnecting()
+    {
+        Intent rfduinoIntent = new Intent(this, RFduinoService.class);
+        bindService( rfduinoIntent, rfduinoServiceConnection, Context.BIND_AUTO_CREATE );
+    }
+
+    private void toggleDoor()
+    {
+        if( rfduinoService != null )
+            rfduinoService.send( new byte[] { 'T' } );
+    }
+
+    @Override
+    public void onClick()
+    {
+        Log.i( TAG, "onClick() with state = " + state.name() );
+        switch( state )
+        {
+            case BLUETOOTH_OFF:
+                enableBluetooth();
+                break;
+            case ERROR:
+                updateState( bluetoothAdapter.isEnabled() ? State.DISCONNECTED : State.BLUETOOTH_OFF );
+                onClick();
+                break;
+            case DISCONNECTED:
+                startScanning();
+                break;
+            case CONNECTED:
+                toggleDoor();
+                break;
+        }
+    }
+
 }
