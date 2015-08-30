@@ -20,6 +20,7 @@ public class RFduinoService extends Service
 {
     private final static String TAG = RFduinoService.class.getSimpleName();
 
+    public static final String GARAGE_NAME = "GarageDuino";
 
     private BluetoothManager mBluetoothManager;
     private BluetoothAdapter mBluetoothAdapter;

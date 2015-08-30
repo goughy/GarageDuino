@@ -7,13 +7,23 @@ import android.content.*;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.IBinder;
+import android.provider.SyncStateContract;
 import android.support.v13.app.FragmentPagerAdapter;
 import android.support.v4.view.ViewPager;
 import android.util.Log;
 import android.view.Menu;
 import android.view.MenuItem;
 import android.view.WindowManager;
+import com.google.android.gms.common.ConnectionResult;
+import com.google.android.gms.common.api.GoogleApiClient;
+import com.google.android.gms.common.api.ResultCallback;
+import com.google.android.gms.common.api.Status;
+import com.google.android.gms.location.Geofence;
+import com.google.android.gms.location.GeofencingRequest;
+import com.google.android.gms.location.LocationServices;
 
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Locale;
 import java.util.UUID;
 
@@ -22,6 +32,10 @@ public class RFduinoActivity extends Activity implements ActionBar.TabListener,
         BluetoothAdapter.LeScanCallback, GarageButtonFragment.OnClickListener
 {
     private static final String TAG = "RFduinoActivity";
+
+    private final Double GARAGE_LAT = -37.753360;
+    private final Double GARAGE_LNG = 145.245943;
+    private final Float GARAGE_RADIUS = 50.0f; //in metres
 
     /**
      * The {@link android.support.v4.view.PagerAdapter} that will provide
@@ -35,6 +49,9 @@ public class RFduinoActivity extends Activity implements ActionBar.TabListener,
     private GarageButtonFragment buttonFragment;
     private GarageInfoFragment infoFragment;
 
+    private List<Geofence> geofenceList = new ArrayList<>();
+    private PendingIntent geofenceIntent;
+    private GoogleApiClient client;
 
     private BluetoothAdapter bluetoothAdapter;
     private BluetoothDevice bluetoothDevice;
@@ -84,10 +101,10 @@ public class RFduinoActivity extends Activity implements ActionBar.TabListener,
                     Log.w( TAG, "rfduinoService connecting to " + bluetoothDevice.getAddress() );
                 }
                 else
-                    Log.w( TAG, "rfduinoService failed to connect to " + bluetoothDevice.getAddress());
+                    Log.w( TAG, "rfduinoService failed to connect to " + bluetoothDevice.getAddress() );
             }
             else
-                Log.w( TAG, "rfduinoService failed to initialise!");
+                Log.w( TAG, "rfduinoService failed to initialise!" );
         }
 
         @Override
@@ -119,8 +136,61 @@ public class RFduinoActivity extends Activity implements ActionBar.TabListener,
         }
     };
 
+    private final GoogleApiClient.ConnectionCallbacks apiCallbacks = new GoogleApiClient.ConnectionCallbacks()
+    {
+
+        @Override
+        public void onConnected( Bundle bundle )
+        {
+            Log.i( TAG, "Google API connected" );
+
+            geofenceList.add( new Geofence.Builder()
+                    .setRequestId( RFduinoService.GARAGE_NAME )
+                    .setCircularRegion(
+                            GARAGE_LAT,
+                            GARAGE_LNG,
+                            GARAGE_RADIUS )
+                    .setExpirationDuration( 24 * 60 * 60 * 1000 )
+                    .setTransitionTypes( Geofence.GEOFENCE_TRANSITION_ENTER )
+                    .build() );
+
+            LocationServices.GeofencingApi.addGeofences(
+                    client,
+                    getGeofencingRequest(),
+                    getGeofencePendingIntent()
+            ).setResultCallback( resultCB );
+        }
+
+        @Override
+        public void onConnectionSuspended( int i )
+        {
+            Log.i( TAG, "Google API suspended" );
+        }
+    };
+
+    private final GoogleApiClient.OnConnectionFailedListener apiFailedCB = new GoogleApiClient.OnConnectionFailedListener()
+    {
+
+        @Override
+        public void onConnectionFailed( ConnectionResult connectionResult )
+        {
+            Log.i( TAG, "Google API failed to connect" );
+        }
+    };
+
+    private final ResultCallback<Status> resultCB = new ResultCallback<Status>()
+    {
+
+        @Override
+        public void onResult( Status status )
+        {
+            Log.i( TAG, "Status of adding geofences to google API: " + status.getStatus() + " - " + status.getStatusMessage() );
+        }
+    };
+
+
     private State state;
-    private static final long SCAN_TIMEOUT= 10000;
+    private static final long SCAN_TIMEOUT = 10000;
 
     private Handler handler = new Handler();
 
@@ -191,7 +261,14 @@ public class RFduinoActivity extends Activity implements ActionBar.TabListener,
         registerReceiver( rfduinoReceiver, RFduinoService.getIntentFilter() );
 
         updateState( bluetoothAdapter.isEnabled() ? State.DISCONNECTED : State.BLUETOOTH_OFF );
-        Log.i(TAG, "Created");
+
+        client = new GoogleApiClient.Builder( this )
+                .addConnectionCallbacks( apiCallbacks )
+                .addOnConnectionFailedListener( apiFailedCB )
+                .addApi( LocationServices.API )
+                .build();
+
+        Log.i( TAG, "Created activity & garage geofence" );
     }
 
     @Override
@@ -211,6 +288,23 @@ public class RFduinoActivity extends Activity implements ActionBar.TabListener,
         unregisterReceiver( rfduinoReceiver );
 
         super.onDestroy();
+    }
+
+    @Override
+    public void onStart()
+    {
+        super.onStart();
+        if( client != null )
+            client.connect();
+    }
+
+    @Override
+    public void onStop()
+    {
+        if( client != null )
+            client.disconnect();
+
+        super.onStart();
     }
 
     @Override
@@ -317,8 +411,28 @@ public class RFduinoActivity extends Activity implements ActionBar.TabListener,
             buttonFragment.setError( msg );
     }
 
+    private GeofencingRequest getGeofencingRequest()
+    {
+        GeofencingRequest.Builder builder = new GeofencingRequest.Builder();
+        builder.setInitialTrigger( GeofencingRequest.INITIAL_TRIGGER_ENTER );
+        builder.addGeofences( geofenceList );
+        return builder.build();
+    }
+
+    private PendingIntent getGeofencePendingIntent()
+    {
+        // Reuse the PendingIntent if we already have it.
+        if( geofenceIntent != null )
+            return geofenceIntent;
+
+        Intent intent = new Intent( this, RFduinoService.class );
+        // We use FLAG_UPDATE_CURRENT so that we get the same pending intent back when
+        // calling addGeofences() and removeGeofences().
+        return PendingIntent.getService( this, 0, intent, PendingIntent.FLAG_UPDATE_CURRENT );
+    }
+
     @Override
-    public void onLeScan(BluetoothDevice device, final int rssi, final byte[] scanRecord)
+    public void onLeScan( BluetoothDevice device, final int rssi, final byte[] scanRecord )
     {
         bluetoothAdapter.stopLeScan( this );
         bluetoothDevice = device;
@@ -372,14 +486,14 @@ public class RFduinoActivity extends Activity implements ActionBar.TabListener,
 
     private void startConnecting()
     {
-        Intent rfduinoIntent = new Intent(this, RFduinoService.class);
+        Intent rfduinoIntent = new Intent( this, RFduinoService.class );
         bindService( rfduinoIntent, rfduinoServiceConnection, Context.BIND_AUTO_CREATE );
     }
 
     private void toggleDoor()
     {
         if( rfduinoService != null )
-            rfduinoService.send( new byte[] { 'T' } );
+            rfduinoService.send( new byte[]{ 'T' } );
     }
 
     @Override
