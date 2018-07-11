@@ -1,15 +1,5 @@
 package org.goughy.garageduino;
 
-import android.content.Context;
-import android.view.LayoutInflater;
-import android.view.View;
-import android.view.ViewGroup;
-import android.widget.ArrayAdapter;
-import android.widget.TextView;
-
-import org.apache.http.util.ByteArrayBuffer;
-
-import java.util.regex.Pattern;
 
 public class HexAsciiHelper {
     public static int PRINTABLE_ASCII_MIN = 0x20; // ' '
@@ -59,23 +49,4 @@ public class HexAsciiHelper {
         return ascii.toString();
     }
 
-    public static byte[] hexToBytes(String hex) {
-        ByteArrayBuffer bytes = new ByteArrayBuffer(hex.length() / 2);
-        for (int i = 0; i < hex.length(); i++) {
-            if (hex.charAt(i) == ' ') {
-                continue;
-            }
-
-            String hexByte;
-            if (i + 1 < hex.length()) {
-                hexByte = hex.substring(i, i + 2).trim();
-                i++;
-            } else {
-                hexByte = hex.substring(i, i + 1);
-            }
-
-            bytes.append(Integer.parseInt(hexByte, 16));
-        }
-        return bytes.buffer();
-    }
 }
